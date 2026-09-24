@@ -171,6 +171,19 @@ $$;
 revoke all on function public.create_direct_conversation(uuid) from public, anon;
 grant execute on function public.create_direct_conversation(uuid) to authenticated;
 
+-- Backfill profiles for Auth users that existed before this schema/trigger.
+insert into public.profiles (id, username)
+select u.id,
+       case when exists (select 1 from public.profiles p where p.username = base_username)
+            then left(base_username, 15) || '-' || substr(u.id::text, 1, 8)
+            else base_username end
+from (
+  select u.*,
+         left(regexp_replace(lower(trim(coalesce(u.raw_user_meta_data->>'username', split_part(coalesce(u.email, 'user'), '@', 1)))), '[^a-z0-9_.-]', '-', 'g'), 24) as base_username
+  from auth.users u
+) u
+where not exists (select 1 from public.profiles p where p.id = u.id);
+
 alter table public.profiles enable row level security;
 alter table public.follows enable row level security;
 alter table public.conversations enable row level security;
@@ -271,15 +284,15 @@ revoke update on public.messages from anon, authenticated;
 -- Realtime Presence/Broadcast authorization. Restrict the topic to authenticated clients.
 drop policy if exists realtime_presence_receive on realtime.messages;
 create policy realtime_presence_receive on realtime.messages for select to authenticated using (
-  (realtime.extension = 'presence' and realtime.topic() = 'presence:global')
+  (realtime.messages.extension = 'presence' and realtime.topic() = 'presence:global')
   or
-  (realtime.extension = 'broadcast' and split_part(realtime.topic(), ':', 1) = 'chat' and (select public.is_conversation_member(split_part(realtime.topic(), ':', 2)::uuid, auth.uid())))
+  (realtime.messages.extension = 'broadcast' and split_part(realtime.topic(), ':', 1) = 'chat' and (select public.is_conversation_member(split_part(realtime.topic(), ':', 2)::uuid, auth.uid())))
 );
 drop policy if exists realtime_presence_send on realtime.messages;
 create policy realtime_presence_send on realtime.messages for insert to authenticated with check (
-  (realtime.extension = 'presence' and realtime.topic() = 'presence:global')
+  (realtime.messages.extension = 'presence' and realtime.topic() = 'presence:global')
   or
-  (realtime.extension = 'broadcast' and split_part(realtime.topic(), ':', 1) = 'chat' and (select public.is_conversation_member(split_part(realtime.topic(), ':', 2)::uuid, auth.uid())))
+  (realtime.messages.extension = 'broadcast' and split_part(realtime.topic(), ':', 1) = 'chat' and (select public.is_conversation_member(split_part(realtime.topic(), ':', 2)::uuid, auth.uid())))
 );
 
 -- Realtime database changes for messages.
@@ -303,3 +316,291 @@ drop policy if exists avatar_delete on storage.objects;
 create policy avatar_delete on storage.objects for delete to authenticated using (bucket_id = 'avatars' and (storage.foldername(name))[1] = (select auth.uid())::text);
 
 -- Optional: in Supabase Dashboard > Realtime Settings, disable public channel access so the private:true channels above require RLS authorization.
+
+
+-- ===== Community / music profile extensions =====
+alter table public.profiles add column if not exists role text not null default 'user' check (role in ('user','founder'));
+alter table public.profiles add column if not exists is_verified boolean not null default false;
+alter table public.profiles add column if not exists verified_by uuid references public.profiles(id) on delete set null;
+alter table public.profiles add column if not exists is_banned boolean not null default false;
+alter table public.profiles add column if not exists banned_at timestamptz;
+alter table public.profiles add column if not exists banned_until timestamptz;
+alter table public.profiles add column if not exists banned_by uuid references public.profiles(id) on delete set null;
+alter table public.profiles add column if not exists ban_reason text;
+alter table public.profiles add column if not exists liked_songs_public boolean not null default true;
+create index if not exists profiles_role_idx on public.profiles(role);
+create index if not exists profiles_banned_idx on public.profiles(is_banned, banned_until);
+
+create table if not exists public.user_playlists (
+  id text primary key,
+  owner_id uuid not null references public.profiles(id) on delete cascade,
+  name text not null check (char_length(trim(name)) between 1 and 100),
+  is_public boolean not null default true,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create table if not exists public.user_playlist_tracks (
+  playlist_id text not null references public.user_playlists(id) on delete cascade,
+  track_id text not null,
+  position integer not null default 0,
+  track jsonb not null,
+  primary key (playlist_id, track_id)
+);
+create table if not exists public.user_liked_songs (
+  user_id uuid not null references public.profiles(id) on delete cascade,
+  track_id text not null,
+  track jsonb not null,
+  created_at timestamptz not null default now(),
+  primary key (user_id, track_id)
+);
+create table if not exists public.notifications (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.profiles(id) on delete cascade,
+  type text not null check (type in ('chat_message','follow','system')),
+  title text not null,
+  body text,
+  reference_id text,
+  actor_id uuid references public.profiles(id) on delete set null,
+  read_at timestamptz,
+  created_at timestamptz not null default now()
+);
+create index if not exists user_playlists_owner_idx on public.user_playlists(owner_id, updated_at desc);
+create index if not exists playlist_tracks_playlist_idx on public.user_playlist_tracks(playlist_id, position);
+create index if not exists notifications_user_unread_idx on public.notifications(user_id, read_at, created_at desc);
+
+alter table public.user_playlists enable row level security;
+alter table public.user_playlist_tracks enable row level security;
+alter table public.user_liked_songs enable row level security;
+alter table public.notifications enable row level security;
+
+-- Public playlist metadata is readable; writes are owner-only.
+drop policy if exists user_playlists_select on public.user_playlists;
+create policy user_playlists_select on public.user_playlists for select to authenticated
+using (owner_id = auth.uid() or is_public = true);
+drop policy if exists user_playlists_insert on public.user_playlists;
+create policy user_playlists_insert on public.user_playlists for insert to authenticated with check (owner_id = auth.uid());
+drop policy if exists user_playlists_update on public.user_playlists;
+create policy user_playlists_update on public.user_playlists for update to authenticated using (owner_id = auth.uid()) with check (owner_id = auth.uid());
+drop policy if exists user_playlists_delete on public.user_playlists;
+create policy user_playlists_delete on public.user_playlists for delete to authenticated using (owner_id = auth.uid());
+
+drop policy if exists playlist_tracks_select on public.user_playlist_tracks;
+create policy playlist_tracks_select on public.user_playlist_tracks for select to authenticated
+using (exists (select 1 from public.user_playlists p where p.id = playlist_id and (p.owner_id = auth.uid() or p.is_public = true)));
+drop policy if exists playlist_tracks_insert on public.user_playlist_tracks;
+create policy playlist_tracks_insert on public.user_playlist_tracks for insert to authenticated
+with check (exists (select 1 from public.user_playlists p where p.id = playlist_id and p.owner_id = auth.uid()));
+drop policy if exists playlist_tracks_update on public.user_playlist_tracks;
+create policy playlist_tracks_update on public.user_playlist_tracks for update to authenticated
+using (exists (select 1 from public.user_playlists p where p.id = playlist_id and p.owner_id = auth.uid()))
+with check (exists (select 1 from public.user_playlists p where p.id = playlist_id and p.owner_id = auth.uid()));
+drop policy if exists playlist_tracks_delete on public.user_playlist_tracks;
+create policy playlist_tracks_delete on public.user_playlist_tracks for delete to authenticated
+using (exists (select 1 from public.user_playlists p where p.id = playlist_id and p.owner_id = auth.uid()));
+
+drop policy if exists liked_songs_select on public.user_liked_songs;
+create policy liked_songs_select on public.user_liked_songs for select to authenticated
+using (user_id = auth.uid() or exists (select 1 from public.profiles p where p.id = user_id and p.liked_songs_public = true));
+drop policy if exists liked_songs_insert on public.user_liked_songs;
+create policy liked_songs_insert on public.user_liked_songs for insert to authenticated with check (user_id = auth.uid());
+drop policy if exists liked_songs_delete on public.user_liked_songs;
+create policy liked_songs_delete on public.user_liked_songs for delete to authenticated using (user_id = auth.uid());
+
+drop policy if exists notifications_select on public.notifications;
+create policy notifications_select on public.notifications for select to authenticated using (user_id = auth.uid());
+drop policy if exists notifications_update on public.notifications;
+create policy notifications_update on public.notifications for update to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+-- Admin helpers. Founder status is stored in the database, never trusted from the browser.
+create or replace function public.is_founder(target_user_id uuid default auth.uid())
+returns boolean
+language sql stable security definer set search_path = public
+as $$ select exists(select 1 from public.profiles where id = target_user_id and role = 'founder'); $$;
+revoke all on function public.is_founder(uuid) from public, anon;
+grant execute on function public.is_founder(uuid) to authenticated;
+
+create or replace function public.admin_list_users(search_text text default '')
+returns setof public.profiles
+language plpgsql stable security definer set search_path = public
+as $$
+begin
+  if not public.is_founder(auth.uid()) then raise exception 'Forbidden'; end if;
+  return query select p.* from public.profiles p
+    where search_text = '' or p.username ilike '%' || search_text || '%'
+    order by p.created_at desc limit 200;
+end; $$;
+revoke all on function public.admin_list_users(text) from public, anon;
+grant execute on function public.admin_list_users(text) to authenticated;
+
+create or replace function public.admin_set_verified(target_user_id uuid, enabled boolean)
+returns void language plpgsql security definer set search_path = public
+as $$
+begin
+  if not public.is_founder(auth.uid()) then raise exception 'Forbidden'; end if;
+  if target_user_id = auth.uid() then raise exception 'Founder verification is controlled by founder role'; end if;
+  update public.profiles set is_verified = enabled, verified_by = case when enabled then auth.uid() else null end where id = target_user_id;
+end; $$;
+revoke all on function public.admin_set_verified(uuid, boolean) from public, anon;
+grant execute on function public.admin_set_verified(uuid, boolean) to authenticated;
+
+create or replace function public.admin_set_ban(target_user_id uuid, banned boolean, reason text default null, until_at timestamptz default null)
+returns void language plpgsql security definer set search_path = public
+as $$
+begin
+  if not public.is_founder(auth.uid()) then raise exception 'Forbidden'; end if;
+  if target_user_id = auth.uid() then raise exception 'Founder tidak dapat memban dirinya sendiri'; end if;
+  update public.profiles
+  set is_banned = banned,
+      banned_at = case when banned then now() else null end,
+      banned_until = case when banned then until_at else null end,
+      banned_by = case when banned then auth.uid() else null end,
+      ban_reason = case when banned then nullif(trim(reason), '') else null end
+  where id = target_user_id;
+end; $$;
+revoke all on function public.admin_set_ban(uuid, boolean, text, timestamptz) from public, anon;
+grant execute on function public.admin_set_ban(uuid, boolean, text, timestamptz) to authenticated;
+
+create or replace function public.mark_chat_notifications_read(target_conversation_id uuid)
+returns void language plpgsql security definer set search_path = public
+as $$
+begin
+  update public.notifications n
+  set read_at = coalesce(read_at, now())
+  where n.user_id = auth.uid() and n.type = 'chat_message' and n.reference_id = target_conversation_id::text and n.read_at is null;
+end; $$;
+revoke all on function public.mark_chat_notifications_read(uuid) from public, anon;
+grant execute on function public.mark_chat_notifications_read(uuid) to authenticated;
+
+create or replace function public.create_chat_notification()
+returns trigger language plpgsql security definer set search_path = public
+as $$
+declare sender_name text;
+begin
+  select username into sender_name from public.profiles where id = new.sender_id;
+  insert into public.notifications(user_id,type,title,body,reference_id,actor_id)
+  values(new.receiver_id,'chat_message','Pesan baru',coalesce(sender_name,'User') || ' mengirim pesan.',new.conversation_id::text,new.sender_id);
+  return new;
+end; $$;
+drop trigger if exists message_notification_trigger on public.messages;
+create trigger message_notification_trigger after insert on public.messages for each row execute function public.create_chat_notification();
+
+-- Only allow users to edit safe profile fields themselves. Admin fields stay protected.
+drop policy if exists profiles_update on public.profiles;
+create policy profiles_update on public.profiles for update to authenticated
+using (auth.uid() = id)
+with check (auth.uid() = id);
+
+-- Realtime database changes for notifications and music-social tables.
+do $$ begin
+  if not exists (select 1 from pg_publication_tables where pubname='supabase_realtime' and schemaname='public' and tablename='notifications') then alter publication supabase_realtime add table public.notifications; end if;
+  if not exists (select 1 from pg_publication_tables where pubname='supabase_realtime' and schemaname='public' and tablename='user_playlists') then alter publication supabase_realtime add table public.user_playlists; end if;
+  if not exists (select 1 from pg_publication_tables where pubname='supabase_realtime' and schemaname='public' and tablename='user_liked_songs') then alter publication supabase_realtime add table public.user_liked_songs; end if;
+end $$;
+
+-- Seed/fix profiles for users created before these columns existed.
+update public.profiles set role='user' where role is null;
+update public.profiles set is_verified=false where is_verified is null;
+update public.profiles set is_banned=false where is_banned is null;
+
+-- Block banned sessions at the database layer as well. This prevents bypassing the UI with direct API calls.
+create or replace function public.is_account_active()
+returns boolean language sql stable security definer set search_path = public
+as $$
+  select coalesce((select not is_banned or (banned_until is not null and banned_until <= now()) from public.profiles where id = auth.uid()), false);
+$$;
+revoke all on function public.is_account_active() from public, anon;
+grant execute on function public.is_account_active() to authenticated;
+
+drop policy if exists profiles_select on public.profiles;
+create policy profiles_select on public.profiles for select to authenticated using (auth.uid() = id or public.is_account_active());
+drop policy if exists profiles_insert on public.profiles;
+create policy profiles_insert on public.profiles for insert to authenticated with check (public.is_account_active() and auth.uid() = id);
+drop policy if exists profiles_update on public.profiles;
+create policy profiles_update on public.profiles for update to authenticated using (public.is_account_active() and auth.uid() = id) with check (public.is_account_active() and auth.uid() = id);
+
+drop policy if exists follows_select on public.follows;
+create policy follows_select on public.follows for select to authenticated using (public.is_account_active());
+drop policy if exists follows_insert on public.follows;
+create policy follows_insert on public.follows for insert to authenticated with check (public.is_account_active() and auth.uid() = follower_id and follower_id <> following_id);
+drop policy if exists follows_delete on public.follows;
+create policy follows_delete on public.follows for delete to authenticated using (public.is_account_active() and auth.uid() = follower_id);
+
+drop policy if exists conversations_select on public.conversations;
+create policy conversations_select on public.conversations for select to authenticated using (public.is_account_active() and public.is_conversation_member(id, auth.uid()));
+drop policy if exists conversations_update on public.conversations;
+create policy conversations_update on public.conversations for update to authenticated using (public.is_account_active() and public.is_conversation_member(id, auth.uid())) with check (public.is_account_active() and public.is_conversation_member(id, auth.uid()));
+
+drop policy if exists members_select on public.conversation_members;
+create policy members_select on public.conversation_members for select to authenticated using (public.is_account_active() and public.is_conversation_member(conversation_id, auth.uid()));
+drop policy if exists members_insert on public.conversation_members;
+create policy members_insert on public.conversation_members for insert to authenticated with check (public.is_account_active() and auth.uid() = user_id and exists(select 1 from public.conversations c where c.id=conversation_id));
+
+drop policy if exists messages_select on public.messages;
+create policy messages_select on public.messages for select to authenticated using (public.is_account_active() and public.is_conversation_member(conversation_id, auth.uid()));
+drop policy if exists messages_insert on public.messages;
+create policy messages_insert on public.messages for insert to authenticated with check (public.is_account_active() and auth.uid() = sender_id and public.is_conversation_member(conversation_id, auth.uid()) and exists(select 1 from public.conversation_members cm where cm.conversation_id=conversation_id and cm.user_id=receiver_id));
+
+drop policy if exists blocks_select on public.blocks;
+create policy blocks_select on public.blocks for select to authenticated using (public.is_account_active() and (blocker_id=auth.uid() or blocked_id=auth.uid()));
+drop policy if exists blocks_insert on public.blocks;
+create policy blocks_insert on public.blocks for insert to authenticated with check (public.is_account_active() and blocker_id=auth.uid() and blocker_id<>blocked_id);
+drop policy if exists blocks_delete on public.blocks;
+create policy blocks_delete on public.blocks for delete to authenticated using (public.is_account_active() and blocker_id=auth.uid());
+
+drop policy if exists reports_insert on public.reports;
+create policy reports_insert on public.reports for insert to authenticated with check (public.is_account_active() and reporter_id=auth.uid() and reporter_id<>reported_user_id);
+drop policy if exists reports_select on public.reports;
+create policy reports_select on public.reports for select to authenticated using (public.is_account_active() and reporter_id=auth.uid());
+
+-- Also require active accounts for music-social tables.
+drop policy if exists user_playlists_select on public.user_playlists;
+create policy user_playlists_select on public.user_playlists for select to authenticated using (public.is_account_active() and (owner_id=auth.uid() or is_public=true));
+drop policy if exists user_playlists_insert on public.user_playlists;
+create policy user_playlists_insert on public.user_playlists for insert to authenticated with check (public.is_account_active() and owner_id=auth.uid());
+drop policy if exists user_playlists_update on public.user_playlists;
+create policy user_playlists_update on public.user_playlists for update to authenticated using (public.is_account_active() and owner_id=auth.uid()) with check (public.is_account_active() and owner_id=auth.uid());
+drop policy if exists user_playlists_delete on public.user_playlists;
+create policy user_playlists_delete on public.user_playlists for delete to authenticated using (public.is_account_active() and owner_id=auth.uid());
+
+drop policy if exists playlist_tracks_select on public.user_playlist_tracks;
+create policy playlist_tracks_select on public.user_playlist_tracks for select to authenticated using (public.is_account_active() and exists(select 1 from public.user_playlists p where p.id=playlist_id and (p.owner_id=auth.uid() or p.is_public=true)));
+drop policy if exists playlist_tracks_insert on public.user_playlist_tracks;
+create policy playlist_tracks_insert on public.user_playlist_tracks for insert to authenticated with check (public.is_account_active() and exists(select 1 from public.user_playlists p where p.id=playlist_id and p.owner_id=auth.uid()));
+drop policy if exists playlist_tracks_update on public.user_playlist_tracks;
+create policy playlist_tracks_update on public.user_playlist_tracks for update to authenticated using (public.is_account_active() and exists(select 1 from public.user_playlists p where p.id=playlist_id and p.owner_id=auth.uid())) with check (public.is_account_active() and exists(select 1 from public.user_playlists p where p.id=playlist_id and p.owner_id=auth.uid()));
+drop policy if exists playlist_tracks_delete on public.user_playlist_tracks;
+create policy playlist_tracks_delete on public.user_playlist_tracks for delete to authenticated using (public.is_account_active() and exists(select 1 from public.user_playlists p where p.id=playlist_id and p.owner_id=auth.uid()));
+
+drop policy if exists liked_songs_select on public.user_liked_songs;
+create policy liked_songs_select on public.user_liked_songs for select to authenticated using (public.is_account_active() and (user_id=auth.uid() or exists(select 1 from public.profiles p where p.id=user_id and p.liked_songs_public=true)));
+drop policy if exists liked_songs_insert on public.user_liked_songs;
+create policy liked_songs_insert on public.user_liked_songs for insert to authenticated with check (public.is_account_active() and user_id=auth.uid());
+drop policy if exists liked_songs_delete on public.user_liked_songs;
+create policy liked_songs_delete on public.user_liked_songs for delete to authenticated using (public.is_account_active() and user_id=auth.uid());
+
+drop policy if exists notifications_select on public.notifications;
+create policy notifications_select on public.notifications for select to authenticated using (public.is_account_active() and user_id=auth.uid());
+drop policy if exists notifications_update on public.notifications;
+create policy notifications_update on public.notifications for update to authenticated using (public.is_account_active() and user_id=auth.uid()) with check (public.is_account_active() and user_id=auth.uid());
+
+-- Founder setup: after registering the founder account, run one line such as:
+-- update public.profiles set role='founder', is_verified=true where username='your_founder_username';
+
+create or replace function public.protect_profile_privileged_fields()
+returns trigger language plpgsql security definer set search_path = public
+as $$
+begin
+  if auth.uid() = old.id and not public.is_founder(auth.uid()) then
+    new.role := old.role;
+    new.is_verified := old.is_verified;
+    new.verified_by := old.verified_by;
+    new.is_banned := old.is_banned;
+    new.banned_at := old.banned_at;
+    new.banned_until := old.banned_until;
+    new.banned_by := old.banned_by;
+    new.ban_reason := old.ban_reason;
+  end if;
+  return new;
+end; $$;
+drop trigger if exists protect_profile_privileged_fields on public.profiles;
+create trigger protect_profile_privileged_fields before update on public.profiles for each row execute function public.protect_profile_privileged_fields();
