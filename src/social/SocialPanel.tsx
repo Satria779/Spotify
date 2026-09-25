@@ -270,17 +270,24 @@ export default function SocialPanel({ currentTrack, playlists, onPlayTrack, onPl
 
   async function loadConversations() {
     if (!supabase || !profile) return;
-    const { data: memberships, error } = await supabase.from("conversation_members").select("conversation_id,conversations(id,updated_at,last_message_at,last_message_preview)").eq("user_id", profile.id).order("joined_at", { ascending: false });
+
+    // Use a server-side RPC instead of querying conversations/conversation_members
+    // directly. This keeps membership checks inside a SECURITY DEFINER function
+    // and avoids exposing conversation rows to the client unnecessarily.
+    const { data, error } = await supabase.rpc("get_my_conversations");
     if (error) { setNotice(error.message); return; }
-    const rows = (memberships || []) as any[];
-    const result: SocialConversation[] = [];
-    for (const row of rows) {
-      const { data: otherMember } = await supabase.from("conversation_members").select("user_id,profiles(id,username,avatar_url,bio,country,last_seen,created_at,updated_at)").eq("conversation_id", row.conversation_id).neq("user_id", profile.id).maybeSingle();
-      if (!otherMember?.profiles) continue;
-      const { count } = await supabase.from("messages").select("id", { count: "exact", head: true }).eq("conversation_id", row.conversation_id).eq("receiver_id", profile.id).is("read_at", null);
-      result.push({ id: row.conversation_id, updated_at: row.conversations?.updated_at || row.conversations?.last_message_at || new Date().toISOString(), last_message_at: row.conversations?.last_message_at || null, last_message_preview: row.conversations?.last_message_preview || null, other: otherMember.profiles as SocialProfile, unread: count || 0 });
-    }
-    result.sort((a,b)=>new Date(b.updated_at).getTime()-new Date(a.updated_at).getTime());
+
+    const result: SocialConversation[] = ((data || []) as any[])
+      .filter(row => row?.other)
+      .map(row => ({
+        id: String(row.conversation_id),
+        updated_at: row.updated_at || row.last_message_at || new Date().toISOString(),
+        last_message_at: row.last_message_at || null,
+        last_message_preview: row.last_message_preview || null,
+        other: row.other as SocialProfile,
+        unread: Number(row.unread || 0),
+      }));
+
     setConversations(result);
   }
 
