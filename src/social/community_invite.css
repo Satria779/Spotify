@@ -1,0 +1,11 @@
+.community-invite-box{margin:10px 12px 0;padding:12px;border:1px solid rgba(255,255,255,.08);border-radius:14px;background:rgba(255,255,255,.025)}
+.community-invite-box>div:first-child{display:flex;flex-direction:column;gap:3px;margin-bottom:9px}
+.community-invite-box small{opacity:.58;font-size:11px}
+.community-invite-search{display:flex;gap:7px}
+.community-invite-search input{flex:1;min-width:0;border:0;outline:0;border-radius:10px;padding:10px 12px;background:rgba(255,255,255,.07);color:inherit}
+.community-invite-search button,.community-invite-row>button{border:0;border-radius:10px;padding:9px 13px;background:rgba(255,255,255,.12);color:inherit;cursor:pointer}
+.community-invite-row{display:flex;align-items:center;gap:9px;padding:9px 0;border-top:1px solid rgba(255,255,255,.06)}
+.community-invite-row img{width:38px;height:38px;border-radius:50%;object-fit:cover}
+.community-invite-row>div:nth-child(2){flex:1;min-width:0}
+.community-invite-row>div:nth-child(2)>div{display:flex;align-items:center;gap:5px;margin-top:3px}
+.community-invite-row>button:disabled{opacity:.45}
