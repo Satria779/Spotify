@@ -49,7 +49,11 @@ type StoryViewer = {
 
 function Icon({ children }: { children: ReactNode }) {
   return (
-    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden="true"
+    >
       {children}
     </svg>
   );
@@ -118,14 +122,16 @@ const Back = () => (
 );
 
 function roleLabel(role?: SocialProfile["role"]) {
-  return role === "founder"
-    ? "Founder"
-    : role === "admin"
-      ? "Admin"
-      : "Member";
+  if (role === "founder") return "Founder";
+  if (role === "admin") return "Admin";
+  return "Member";
 }
 
-function RoleBadge({ role }: { role?: SocialProfile["role"] }) {
+function RoleBadge({
+  role,
+}: {
+  role?: SocialProfile["role"];
+}) {
   return (
     <span
       className={`community-role-badge role-${
@@ -141,8 +147,14 @@ function RoleBadge({ role }: { role?: SocialProfile["role"] }) {
   );
 }
 
-function Verified({ profile }: { profile?: SocialProfile }) {
-  if (!profile?.is_verified && profile?.role !== "founder") return null;
+function Verified({
+  profile,
+}: {
+  profile?: SocialProfile;
+}) {
+  if (!profile?.is_verified && profile?.role !== "founder") {
+    return null;
+  }
 
   return (
     <span
@@ -164,22 +176,32 @@ export default function CommunityFeatures({
   notify: (message: string) => void;
   onBack: () => void;
 }) {
-  const [tab, setTab] = useState<"group" | "stories" | "visitors">("group");
+  const [tab, setTab] = useState<
+    "group" | "stories" | "visitors"
+  >("group");
 
   const [groupId, setGroupId] = useState<string | null>(null);
-  const [groupName, setGroupName] = useState("Global Community");
+  const [groupName, setGroupName] =
+    useState("Global Community");
 
   const [messages, setMessages] = useState<GroupMessage[]>([]);
   const [input, setInput] = useState("");
-  const [imageFile, setImageFile] = useState<File | null>(null);
+  const [imageFile, setImageFile] =
+    useState<File | null>(null);
 
   const [stories, setStories] = useState<Story[]>([]);
   const [visitors, setVisitors] = useState<Visitor[]>([]);
 
-  const [storyFile, setStoryFile] = useState<File | null>(null);
-  const [storyCaption, setStoryCaption] = useState("");
-  const [storyViewers, setStoryViewers] = useState<StoryViewer[]>([]);
-  const [selectedStory, setSelectedStory] = useState<Story | null>(null);
+  const [storyFile, setStoryFile] =
+    useState<File | null>(null);
+  const [storyCaption, setStoryCaption] =
+    useState("");
+
+  const [storyViewers, setStoryViewers] =
+    useState<StoryViewer[]>([]);
+
+  const [selectedStory, setSelectedStory] =
+    useState<Story | null>(null);
 
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
@@ -187,112 +209,132 @@ export default function CommunityFeatures({
   const endRef = useRef<HTMLDivElement | null>(null);
 
   const canPin =
-    profile.role === "founder" || profile.role === "admin";
+    profile.role === "founder" ||
+    profile.role === "admin";
 
   const canModerate =
-    profile.role === "founder" || profile.role === "admin";
+    profile.role === "founder" ||
+    profile.role === "admin";
 
   /*
-   * =========================================================
-   * LOAD GLOBAL COMMUNITY
-   * =========================================================
+   * LOAD GLOBAL GROUP
    *
-   * FIX:
-   * Jangan memakai RPC get_global_group.
-   * Ambil langsung dari public.community_groups.
+   * Primary:
+   *   RPC get_global_group()
    *
-   * Struktur tabel:
-   * - id
-   * - slug
-   * - name
-   * - is_global
+   * Fallback:
+   *   direct query community_groups
+   *
+   * Jadi kalau RPC bermasalah setelah deploy,
+   * grup tetap bisa ditemukan.
    */
   async function loadGroup() {
     if (!supabase) return;
 
     setNotice("");
 
-    const { data: row, error } = await supabase
-      .from("community_groups")
-      .select("id, slug, name, is_global")
-      .eq("slug", "global-community")
-      .eq("is_global", true)
-      .maybeSingle();
+    let group: {
+      id: string;
+      name: string;
+    } | null = null;
 
-    if (error) {
-      console.error(
-        "[Community] Failed to load global group:",
-        error
-      );
+    // 1. Coba RPC terlebih dahulu.
+    try {
+      const { data, error } =
+        await supabase.rpc("get_global_group");
 
-      setNotice(`Gagal memuat grup: ${error.message}`);
-      return;
+      if (!error && data?.length) {
+        group = {
+          id: data[0].id,
+          name: data[0].name,
+        };
+      }
+    } catch {
+      // Fallback di bawah.
     }
 
-    if (!row) {
-      console.error(
-        "[Community] Global Community tidak ditemukan"
-      );
+    // 2. Fallback langsung ke tabel.
+    if (!group) {
+      const { data, error } = await supabase
+        .from("community_groups")
+        .select("id,name,slug")
+        .eq("slug", "global")
+        .maybeSingle();
 
-      setNotice(
-        "Global Community tidak ditemukan di database."
-      );
+      if (error) {
+        setNotice(
+          `Gagal memuat grup: ${error.message}`
+        );
+        return;
+      }
 
+      if (data) {
+        group = {
+          id: data.id,
+          name: data.name,
+        };
+      }
+    }
+
+    // 3. Kalau benar-benar tidak ada grup.
+    if (!group) {
       setGroupId(null);
+      setGroupName("Global Community");
       setMessages([]);
 
+      setNotice(
+        "Grup public belum ditemukan. Pastikan community_schema.sql sudah dijalankan di Supabase."
+      );
+
       return;
     }
 
-    console.log(
-      "[Community] Global Community loaded:",
-      row
-    );
+    // 4. Grup berhasil ditemukan.
+    setGroupId(group.id);
+    setGroupName(group.name);
 
-    setGroupId(row.id);
-    setGroupName(row.name || "Global Community");
+    // 5. Load pesan.
+    const { data: ms, error: me } =
+      await supabase
+        .from("group_messages")
+        .select(
+          `
+          id,
+          group_id,
+          sender_id,
+          message,
+          image_url,
+          created_at,
+          deleted_at,
+          is_pinned,
+          pinned_at,
+          is_system,
+          system_message,
+          sender:profiles!group_messages_sender_id_fkey(
+            id,
+            username,
+            avatar_url,
+            role,
+            is_verified
+          )
+        `
+        )
+        .eq("group_id", group.id)
+        .order("created_at", {
+          ascending: true,
+        })
+        .limit(150);
 
     /*
-     * Load group messages
+     * PENTING:
+     * Kalau query pesan error, jangan sembunyikan grup.
+     * Header grup tetap ditampilkan.
      */
-    const { data: ms, error: me } = await supabase
-      .from("group_messages")
-      .select(`
-        id,
-        group_id,
-        sender_id,
-        message,
-        image_url,
-        created_at,
-        deleted_at,
-        is_pinned,
-        pinned_at,
-        is_system,
-        system_message,
-        sender:profiles!group_messages_sender_id_fkey(
-          id,
-          username,
-          avatar_url,
-          role,
-          is_verified
-        )
-      `)
-      .eq("group_id", row.id)
-      .order("created_at", {
-        ascending: true,
-      })
-      .limit(150);
-
     if (me) {
-      console.error(
-        "[Community] Failed to load messages:",
-        me
-      );
-
+      setMessages([]);
       setNotice(
-        `Gagal memuat pesan: ${me.message}`
+        `Grup berhasil ditemukan, tetapi pesan gagal dimuat: ${me.message}`
       );
-
       return;
     }
 
@@ -301,27 +343,46 @@ export default function CommunityFeatures({
     );
   }
 
-  /*
-   * =========================================================
-   * STORIES
-   * =========================================================
-   */
-
   async function loadStories() {
     if (!supabase) return;
 
-    const { data, error } = await supabase
-      .from("stories")
-      .select(
-        "id,user_id,media_url,media_type,caption,created_at,expires_at,owner:profiles!stories_user_id_fkey(id,username,avatar_url,role,is_verified),mentions:story_mentions(mentioned:profiles!story_mentions_mentioned_user_id_fkey(id,username,avatar_url,role,is_verified))"
-      )
-      .gt(
-        "expires_at",
-        new Date().toISOString()
-      )
-      .order("created_at", {
-        ascending: false,
-      });
+    const { data, error } =
+      await supabase
+        .from("stories")
+        .select(
+          `
+          id,
+          user_id,
+          media_url,
+          media_type,
+          caption,
+          created_at,
+          expires_at,
+          owner:profiles!stories_user_id_fkey(
+            id,
+            username,
+            avatar_url,
+            role,
+            is_verified
+          ),
+          mentions:story_mentions(
+            mentioned:profiles!story_mentions_mentioned_user_id_fkey(
+              id,
+              username,
+              avatar_url,
+              role,
+              is_verified
+            )
+          )
+        `
+        )
+        .gt(
+          "expires_at",
+          new Date().toISOString()
+        )
+        .order("created_at", {
+          ascending: false,
+        });
 
     if (error) {
       setNotice(error.message);
@@ -338,25 +399,30 @@ export default function CommunityFeatures({
     );
   }
 
-  /*
-   * =========================================================
-   * PROFILE VISITORS
-   * =========================================================
-   */
-
   async function loadVisitors() {
     if (!supabase) return;
 
-    const { data, error } = await supabase
-      .from("profile_visits")
-      .select(
-        "id,visited_at,visitor:profiles!profile_visits_visitor_id_fkey(id,username,avatar_url,role,is_verified)"
-      )
-      .eq("visited_id", profile.id)
-      .order("visited_at", {
-        ascending: false,
-      })
-      .limit(100);
+    const { data, error } =
+      await supabase
+        .from("profile_visits")
+        .select(
+          `
+          id,
+          visited_at,
+          visitor:profiles!profile_visits_visitor_id_fkey(
+            id,
+            username,
+            avatar_url,
+            role,
+            is_verified
+          )
+        `
+        )
+        .eq("visited_id", profile.id)
+        .order("visited_at", {
+          ascending: false,
+        })
+        .limit(100);
 
     if (error) {
       setNotice(error.message);
@@ -369,11 +435,8 @@ export default function CommunityFeatures({
   }
 
   /*
-   * =========================================================
-   * TAB LOADER
-   * =========================================================
+   * Load sesuai tab.
    */
-
   useEffect(() => {
     if (tab === "group") {
       void loadGroup();
@@ -389,11 +452,8 @@ export default function CommunityFeatures({
   }, [tab, profile.id]);
 
   /*
-   * =========================================================
-   * REALTIME GROUP CHAT
-   * =========================================================
+   * Realtime group messages.
    */
-
   useEffect(() => {
     if (!supabase || !groupId) return;
 
@@ -421,30 +481,23 @@ export default function CommunityFeatures({
     };
   }, [groupId]);
 
-  /*
-   * =========================================================
-   * AUTO SCROLL
-   * =========================================================
-   */
-
   useEffect(() => {
     endRef.current?.scrollIntoView({
       behavior: "smooth",
     });
   }, [messages.length]);
 
-  /*
-   * =========================================================
-   * SEND GROUP MESSAGE
-   * =========================================================
-   */
-
   async function sendGroupMessage(
     e?: FormEvent
   ) {
     e?.preventDefault();
 
-    if (!supabase || !groupId) return;
+    if (!supabase || !groupId) {
+      setNotice(
+        "Grup belum siap. Coba refresh halaman."
+      );
+      return;
+    }
 
     const text = input.trim();
 
@@ -457,7 +510,9 @@ export default function CommunityFeatures({
       let imageUrl: string | null = null;
 
       if (imageFile) {
-        if (!imageFile.type.startsWith("image/")) {
+        if (
+          !imageFile.type.startsWith("image/")
+        ) {
           throw new Error(
             "File harus berupa gambar."
           );
@@ -480,14 +535,10 @@ export default function CommunityFeatures({
         const { error } =
           await supabase.storage
             .from("group-media")
-            .upload(
-              path,
-              imageFile,
-              {
-                contentType: imageFile.type,
-                upsert: false,
-              }
-            );
+            .upload(path, imageFile, {
+              contentType: imageFile.type,
+              upsert: false,
+            });
 
         if (error) throw error;
 
@@ -525,12 +576,6 @@ export default function CommunityFeatures({
     }
   }
 
-  /*
-   * =========================================================
-   * DELETE MESSAGE
-   * =========================================================
-   */
-
   async function deleteGroupMessage(
     id: string
   ) {
@@ -551,12 +596,6 @@ export default function CommunityFeatures({
     }
   }
 
-  /*
-   * =========================================================
-   * KICK MEMBER
-   * =========================================================
-   */
-
   async function kickMember(
     userId: string
   ) {
@@ -576,20 +615,11 @@ export default function CommunityFeatures({
       notify(
         "Member dikeluarkan dari komunitas."
       );
-
       await loadGroup();
     }
   }
 
-  /*
-   * =========================================================
-   * PIN MESSAGE
-   * =========================================================
-   */
-
-  async function pinMessage(
-    id: string
-  ) {
+  async function pinMessage(id: string) {
     if (!supabase || !canPin) return;
 
     const { error } =
@@ -607,12 +637,6 @@ export default function CommunityFeatures({
     }
   }
 
-  /*
-   * =========================================================
-   * POST STORY
-   * =========================================================
-   */
-
   async function postStory(
     e?: FormEvent
   ) {
@@ -624,7 +648,9 @@ export default function CommunityFeatures({
     setNotice("");
 
     try {
-      if (!storyFile.type.startsWith("image/")) {
+      if (
+        !storyFile.type.startsWith("image/")
+      ) {
         throw new Error(
           "Story harus berupa gambar."
         );
@@ -642,20 +668,15 @@ export default function CommunityFeatures({
           .pop()
           ?.toLowerCase() || "jpg";
 
-      const path =
-        `${profile.id}/${crypto.randomUUID()}.${ext}`;
+      const path = `${profile.id}/${crypto.randomUUID()}.${ext}`;
 
       const { error } =
         await supabase.storage
           .from("stories")
-          .upload(
-            path,
-            storyFile,
-            {
-              contentType: storyFile.type,
-              upsert: false,
-            }
-          );
+          .upload(path, storyFile, {
+            contentType: storyFile.type,
+            upsert: false,
+          });
 
       if (error) throw error;
 
@@ -680,9 +701,7 @@ export default function CommunityFeatures({
         .select("id")
         .single();
 
-      if (insertError) {
-        throw insertError;
-      }
+      if (insertError) throw insertError;
 
       const tags = [
         ...storyCaption.matchAll(
@@ -726,18 +745,11 @@ export default function CommunityFeatures({
     }
   }
 
-  /*
-   * =========================================================
-   * OPEN STORY
-   * =========================================================
-   */
-
-  async function openStory(
-    st: Story
-  ) {
+  async function openStory(st: Story) {
     if (!supabase) return;
 
     setSelectedStory(st);
+    setStoryViewers([]);
 
     if (st.user_id !== profile.id) {
       await supabase.rpc(
@@ -753,7 +765,17 @@ export default function CommunityFeatures({
         await supabase
           .from("story_views")
           .select(
-            "id,viewed_at,viewer:profiles!story_views_viewer_id_fkey(id,username,avatar_url,role,is_verified)"
+            `
+            id,
+            viewed_at,
+            viewer:profiles!story_views_viewer_id_fkey(
+              id,
+              username,
+              avatar_url,
+              role,
+              is_verified
+            )
+          `
           )
           .eq("story_id", st.id)
           .order("viewed_at", {
@@ -770,15 +792,7 @@ export default function CommunityFeatures({
     }
   }
 
-  /*
-   * =========================================================
-   * DELETE STORY
-   * =========================================================
-   */
-
-  async function deleteStory(
-    id: string
-  ) {
+  async function deleteStory(id: string) {
     if (!supabase) return;
 
     const { error } =
@@ -795,15 +809,8 @@ export default function CommunityFeatures({
     }
   }
 
-  /*
-   * =========================================================
-   * UI
-   * =========================================================
-   */
-
   return (
     <div className="community-root">
-
       <div className="community-top">
         <button
           className="social-back-text"
@@ -823,21 +830,27 @@ export default function CommunityFeatures({
 
       <div className="community-tabs">
         <button
-          className={tab === "group" ? "active" : ""}
+          className={
+            tab === "group" ? "active" : ""
+          }
           onClick={() => setTab("group")}
         >
           Grup
         </button>
 
         <button
-          className={tab === "stories" ? "active" : ""}
+          className={
+            tab === "stories" ? "active" : ""
+          }
           onClick={() => setTab("stories")}
         >
           Story
         </button>
 
         <button
-          className={tab === "visitors" ? "active" : ""}
+          className={
+            tab === "visitors" ? "active" : ""
+          }
           onClick={() => setTab("visitors")}
         >
           Pengunjung
@@ -858,255 +871,252 @@ export default function CommunityFeatures({
 
       {tab === "group" ? (
         <div className="community-group">
-
           <div className="community-group-head">
             <div>
-              <strong>
-                {groupName}
-              </strong>
+              <strong>{groupName}</strong>
 
               <small>
-                Semua akun baru otomatis menjadi member
+                Semua akun baru otomatis menjadi
+                member
               </small>
             </div>
 
-            <RoleBadge
-              role={profile.role}
-            />
+            <RoleBadge role={profile.role} />
           </div>
 
-          <div className="community-messages">
+          {!groupId ? (
+            <div className="social-empty small">
+              <p>
+                Grup belum tersedia.
+              </p>
 
-            {messages.map((m) => (
-              <div
-                key={m.id}
-                className={`community-message ${
-                  m.sender_id === profile.id
-                    ? "mine"
-                    : ""
-                }`}
+              <button
+                className="social-primary-btn compact"
+                onClick={() => void loadGroup()}
               >
-
-                <img
-                  src={
-                    m.sender?.avatar_url ||
-                    "/images/satriamusic-cover.jpg"
-                  }
-                  alt=""
-                />
-
-                <div className="community-message-body">
-
-                  <div className="community-message-name">
-
-                    <strong>
-                      {m.is_system
-                        ? "Community Bot"
-                        : m.sender?.username ||
-                          "User"}
-                    </strong>
-
-                    {m.is_system ? (
-                      <span className="community-bot-badge">
-                        BOT
-                      </span>
-                    ) : (
-                      <>
-                        <Verified
-                          profile={m.sender}
-                        />
-
-                        <RoleBadge
-                          role={m.sender?.role}
-                        />
-                      </>
-                    )}
-
-                  </div>
-
-                  {m.image_url ? (
+                Coba lagi
+              </button>
+            </div>
+          ) : (
+            <>
+              <div className="community-messages">
+                {messages.map((m) => (
+                  <div
+                    key={m.id}
+                    className={`community-message ${
+                      m.sender_id === profile.id
+                        ? "mine"
+                        : ""
+                    }`}
+                  >
                     <img
-                      className="community-photo"
-                      src={m.image_url}
-                      alt="Foto pesan"
-                    />
-                  ) : null}
-
-                  {m.is_system ? (
-                    <div className="community-message-text community-bot-message">
-                      {m.system_message ||
-                        "Pesan dihapus oleh moderasi."}
-                    </div>
-                  ) : m.message ? (
-                    <div className="community-message-text">
-                      {m.deleted_at
-                        ? "Pesan dihapus"
-                        : m.message}
-                    </div>
-                  ) : null}
-
-                  <small>
-                    {new Date(
-                      m.created_at
-                    ).toLocaleString(
-                      "id-ID",
-                      {
-                        hour: "2-digit",
-                        minute: "2-digit",
-                        day: "2-digit",
-                        month: "2-digit",
+                      src={
+                        m.sender?.avatar_url ||
+                        "/images/satriamusic-cover.jpg"
                       }
-                    )}
+                      alt=""
+                    />
 
-                    {m.is_pinned
-                      ? " · Disematkan"
-                      : ""}
-                  </small>
+                    <div className="community-message-body">
+                      <div className="community-message-name">
+                        <strong>
+                          {m.is_system
+                            ? "Community Bot"
+                            : m.sender?.username ||
+                              "User"}
+                        </strong>
 
-                  <div className="community-message-actions">
+                        {m.is_system ? (
+                          <span className="community-bot-badge">
+                            BOT
+                          </span>
+                        ) : (
+                          <>
+                            <Verified
+                              profile={m.sender}
+                            />
 
-                    {!m.deleted_at &&
-                    (
-                      m.sender_id ===
-                        profile.id ||
-                      (
-                        canModerate &&
+                            <RoleBadge
+                              role={
+                                m.sender?.role
+                              }
+                            />
+                          </>
+                        )}
+                      </div>
+
+                      {m.image_url ? (
+                        <img
+                          className="community-photo"
+                          src={m.image_url}
+                          alt="Foto pesan"
+                        />
+                      ) : null}
+
+                      {m.is_system ? (
+                        <div className="community-message-text community-bot-message">
+                          {m.system_message ||
+                            "Pesan dihapus oleh moderasi."}
+                        </div>
+                      ) : m.message ? (
+                        <div className="community-message-text">
+                          {m.deleted_at
+                            ? "Pesan dihapus"
+                            : m.message}
+                        </div>
+                      ) : null}
+
+                      <small>
+                        {new Date(
+                          m.created_at
+                        ).toLocaleString(
+                          "id-ID",
+                          {
+                            hour: "2-digit",
+                            minute: "2-digit",
+                            day: "2-digit",
+                            month: "2-digit",
+                          }
+                        )}
+
+                        {m.is_pinned
+                          ? " · Disematkan"
+                          : ""}
+                      </small>
+
+                      <div className="community-message-actions">
+                        {!m.deleted_at &&
+                        (
+                          m.sender_id ===
+                            profile.id ||
+                          (canModerate &&
+                            m.sender?.role !==
+                              "founder" &&
+                            (profile.role ===
+                              "founder" ||
+                              m.sender?.role !==
+                                "admin"))
+                        ) ? (
+                          <button
+                            onClick={() =>
+                              void deleteGroupMessage(
+                                m.id
+                              )
+                            }
+                          >
+                            Hapus
+                          </button>
+                        ) : null}
+
+                        {canPin &&
+                        !m.deleted_at ? (
+                          <button
+                            onClick={() =>
+                              void pinMessage(
+                                m.id
+                              )
+                            }
+                          >
+                            <Pin />
+
+                            {m.is_pinned
+                              ? "Lepas"
+                              : "Sematkan"}
+                          </button>
+                        ) : null}
+
+                        {canModerate &&
+                        m.sender_id &&
+                        m.sender_id !==
+                          profile.id &&
                         m.sender?.role !==
                           "founder" &&
-                        (
-                          profile.role ===
-                            "founder" ||
-                          m.sender?.role !==
-                            "admin"
-                        )
-                      )
-                    ) ? (
-                      <button
-                        onClick={() =>
-                          void deleteGroupMessage(
-                            m.id
-                          )
-                        }
-                      >
-                        Hapus
-                      </button>
-                    ) : null}
-
-                    {canPin &&
-                    !m.deleted_at ? (
-                      <button
-                        onClick={() =>
-                          void pinMessage(
-                            m.id
-                          )
-                        }
-                      >
-                        <Pin />
-                        {m.is_pinned
-                          ? "Lepas"
-                          : "Sematkan"}
-                      </button>
-                    ) : null}
-
-                    {canModerate &&
-                    m.sender_id &&
-                    m.sender_id !== profile.id &&
-                    m.sender?.role !==
-                      "founder" &&
-                    (
-                      profile.role ===
-                        "founder" ||
-                      m.sender?.role ===
-                        "member"
-                    ) ? (
-                      <button
-                        onClick={() =>
-                          void kickMember(
-                            m.sender_id!
-                          )
-                        }
-                      >
-                        Kick
-                      </button>
-                    ) : null}
-
+                        (profile.role ===
+                          "founder" ||
+                          m.sender?.role ===
+                            "member") ? (
+                          <button
+                            onClick={() =>
+                              void kickMember(
+                                m.sender_id!
+                              )
+                            }
+                          >
+                            Kick
+                          </button>
+                        ) : null}
+                      </div>
+                    </div>
                   </div>
+                ))}
 
-                </div>
+                <div ref={endRef} />
+
+                {!messages.length ? (
+                  <div className="social-empty small">
+                    <p>
+                      Belum ada pesan di grup.
+                    </p>
+                  </div>
+                ) : null}
               </div>
-            ))}
 
-            <div ref={endRef} />
+              <form
+                className="community-composer"
+                onSubmit={sendGroupMessage}
+              >
+                <label
+                  className="social-icon-btn"
+                  title="Kirim foto"
+                >
+                  <ImageIcon />
 
-            {!messages.length ? (
-              <div className="social-empty small">
-                <p>
-                  Belum ada pesan di grup.
-                </p>
-              </div>
-            ) : null}
+                  <input
+                    hidden
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp"
+                    onChange={(e) =>
+                      setImageFile(
+                        e.target.files?.[0] ||
+                          null
+                      )
+                    }
+                  />
+                </label>
 
-          </div>
+                {imageFile ? (
+                  <span className="community-file">
+                    {imageFile.name}
+                  </span>
+                ) : null}
 
-          <form
-            className="community-composer"
-            onSubmit={sendGroupMessage}
-          >
+                <input
+                  value={input}
+                  onChange={(e) =>
+                    setInput(e.target.value)
+                  }
+                  placeholder="Tulis di grup..."
+                  maxLength={2000}
+                />
 
-            <label
-              className="social-icon-btn"
-              title="Kirim foto"
-            >
-              <ImageIcon />
-
-              <input
-                hidden
-                type="file"
-                accept="image/png,image/jpeg,image/webp"
-                onChange={(e) =>
-                  setImageFile(
-                    e.target.files?.[0] ||
-                      null
-                  )
-                }
-              />
-            </label>
-
-            {imageFile ? (
-              <span className="community-file">
-                {imageFile.name}
-              </span>
-            ) : null}
-
-            <input
-              value={input}
-              onChange={(e) =>
-                setInput(e.target.value)
-              }
-              placeholder="Tulis di grup..."
-              maxLength={2000}
-            />
-
-            <button
-              className="social-send-btn"
-              disabled={
-                busy ||
-                (
-                  !input.trim() &&
-                  !imageFile
-                )
-              }
-            >
-              <Send />
-            </button>
-
-          </form>
+                <button
+                  className="social-send-btn"
+                  disabled={
+                    busy ||
+                    (!input.trim() &&
+                      !imageFile)
+                  }
+                >
+                  <Send />
+                </button>
+              </form>
+            </>
+          )}
         </div>
       ) : null}
 
       {tab === "stories" ? (
         <div className="community-stories">
-
           <form
             className="community-story-create"
             onSubmit={postStory}
@@ -1131,9 +1141,7 @@ export default function CommunityFeatures({
             <input
               value={storyCaption}
               onChange={(e) =>
-                setStoryCaption(
-                  e.target.value
-                )
+                setStoryCaption(e.target.value)
               }
               placeholder="Tambahkan caption (opsional)"
               maxLength={160}
@@ -1141,9 +1149,7 @@ export default function CommunityFeatures({
 
             <button
               className="social-primary-btn compact"
-              disabled={
-                busy || !storyFile
-              }
+              disabled={busy || !storyFile}
             >
               {busy
                 ? "Memproses..."
@@ -1152,13 +1158,11 @@ export default function CommunityFeatures({
           </form>
 
           <div className="story-grid">
-
             {stories.map((st) => (
               <article
                 className="story-card"
                 key={st.id}
               >
-
                 <button
                   className="story-open"
                   onClick={() =>
@@ -1172,15 +1176,12 @@ export default function CommunityFeatures({
                 </button>
 
                 <div>
-
                   <strong>
                     {st.owner?.username ||
                       "User"}
                   </strong>
 
-                  <Verified
-                    profile={st.owner}
-                  />
+                  <Verified profile={st.owner} />
 
                   <RoleBadge
                     role={st.owner?.role}
@@ -1241,12 +1242,9 @@ export default function CommunityFeatures({
                       </button>
                     </>
                   ) : null}
-
                 </div>
-
               </article>
             ))}
-
           </div>
 
           {!stories.length ? (
@@ -1256,7 +1254,6 @@ export default function CommunityFeatures({
               </p>
             </div>
           ) : null}
-
         </div>
       ) : null}
 
@@ -1273,7 +1270,6 @@ export default function CommunityFeatures({
               e.stopPropagation()
             }
           >
-
             <button
               className="story-view-close"
               onClick={() =>
@@ -1289,16 +1285,13 @@ export default function CommunityFeatures({
             />
 
             <div className="story-view-meta">
-
               <strong>
                 {selectedStory.owner
                   ?.username || "User"}
               </strong>
 
               <Verified
-                profile={
-                  selectedStory.owner
-                }
+                profile={selectedStory.owner}
               />
 
               <RoleBadge
@@ -1316,49 +1309,38 @@ export default function CommunityFeatures({
               {selectedStory.user_id ===
               profile.id ? (
                 <div className="story-viewer-list">
-
                   <strong>
                     {storyViewers.length}{" "}
                     penonton
                   </strong>
 
-                  {storyViewers.map(
-                    (v) => (
-                      <div key={v.id}>
+                  {storyViewers.map((v) => (
+                    <div key={v.id}>
+                      <img
+                        src={
+                          v.viewer?.avatar_url ||
+                          "/images/satriamusic-cover.jpg"
+                        }
+                        alt=""
+                      />
 
-                        <img
-                          src={
-                            v.viewer
-                              ?.avatar_url ||
-                            "/images/satriamusic-cover.jpg"
-                          }
-                          alt=""
-                        />
+                      <span>
+                        {v.viewer?.username ||
+                          "User"}
+                      </span>
 
-                        <span>
-                          {v.viewer
-                            ?.username ||
-                            "User"}
-                        </span>
-
-                        <Verified
-                          profile={
-                            v.viewer
-                          }
-                        />
-
-                      </div>
-                    )
-                  )}
-
+                      <Verified
+                        profile={v.viewer}
+                      />
+                    </div>
+                  ))}
                 </div>
               ) : (
                 <small>
-                  Story dibuka dan
-                  kunjungan dicatat.
+                  Story dibuka dan kunjungan
+                  dicatat.
                 </small>
               )}
-
             </div>
           </div>
         </div>
@@ -1366,15 +1348,14 @@ export default function CommunityFeatures({
 
       {tab === "visitors" ? (
         <div className="community-visitors">
-
           <div className="community-section-title">
             <h3>
               Yang mengunjungi profilmu
             </h3>
 
             <small>
-              Pengunjung dicatat saat
-              mereka membuka profilmu.
+              Pengunjung dicatat saat mereka
+              membuka profilmu.
             </small>
           </div>
 
@@ -1383,7 +1364,6 @@ export default function CommunityFeatures({
               className="community-visitor-row"
               key={v.id}
             >
-
               <img
                 src={
                   v.visitor?.avatar_url ||
@@ -1393,7 +1373,6 @@ export default function CommunityFeatures({
               />
 
               <div>
-
                 <strong>
                   {v.visitor?.username ||
                     "User"}
@@ -1410,13 +1389,9 @@ export default function CommunityFeatures({
                 <small>
                   {new Date(
                     v.visited_at
-                  ).toLocaleString(
-                    "id-ID"
-                  )}
+                  ).toLocaleString("id-ID")}
                 </small>
-
               </div>
-
             </div>
           ))}
 
@@ -1427,10 +1402,8 @@ export default function CommunityFeatures({
               </p>
             </div>
           ) : null}
-
         </div>
       ) : null}
-
     </div>
   );
 }
